@@ -1,0 +1,351 @@
+In this page I describe how to create RESTFull API for Selling Apples in a Marketplace. 
+
+At this toturial we wanna provide solution for the following public api endpoint
+
+GET 	https://localhost/appleLots  	   	list all appleLots in JSON format
+ 
+GET 	https://localhost/appleLots/2 		get a specific appleLot by id
+
+POST	https://localhost/appleLots/ 			creates new appleLot
+
+		I used PostMan HTTP client to test these APIs. So, for the post purpose of the above API we send following data through Body >> JSON
+		
+		{
+			"company_name" : "Delicious Apples LTD",
+			"cultiver" : "Red Dacca", 
+			"country_of_origin" : "Costa Rica", 
+			"harvested_date" : "2018-07-27", 
+			"weight" : 1000
+		}
+		
+PUT		https://localhost/appleLots/2		updates a specific appleLot by id
+		
+		To apdate a record by using PostMan send update data through Body >> JSON like bellow.
+		
+		{
+			"company_name" : "Delicious Apples LTD",
+			"cultiver" : "aaa", 
+			"country_of_origin" : "AFG", 
+			"harvested_date" : "2022-06-14", //here we updated the date to "2022-06-14".
+			"weight" : 1000
+		}
+
+in order to have useful urls we need to do some url rewriting, as I using Apache lets add a new file by name of .htaccess and add the folowing codes to it:
+
+RewriteEngine On
+RewriteRule . index.php
+
+"RewriteRule . index.php" get any url and substitute it with index.php for example if we use https://localhost/appleLots, server redirect us to indx.php
+
+Now we code index.php as bellow:
+
+<?php
+	declare(strict_types=1);
+	
+	//spl_autoload_register function is used to autoload any class inside the specific directory no need for importing them.
+	spl_autoload_register(function ($class) {
+		require __DIR__ . "/$class.php";
+	});
+	
+	//
+	set_error_handler("ErrorHandler::handleError");
+	set_exception_handler("ErrorHandler::handleException");
+	
+	//As we want responses to be in JSON format, use this header function.
+	header("Content-type: application/json; charset=UTF-8");
+	
+	//this explode current url to parts so that, we can handle the url better then.
+	$parts = explode("/", $_SERVER["REQUEST_URI"]);
+	
+	//if this part of url not to be "appleLots" it will return status code would be 404 page not found 
+	if ($parts[1] != "appleLots") {
+		http_response_code(404);
+		exit;
+	}
+
+	
+	$id = $parts[2] ?? null;
+	
+	//calling Database(predefined class)  connect us to the database.
+	$database = new Database("localhost", "appleLot_db", "root", "");
+	
+	//ApppleLotGateway(predefined class) is used to intracts with database's appleLot table like a model.
+	$gateway = new ApppleLotGateway($database);
+	
+	//AppleLotController(predefined class) is used to control our APIs.
+	$controller = new AppleLotController($gateway);
+
+	$controller->processRequest($_SERVER["REQUEST_METHOD"], $id);
+?> 
+
+//Now we use database, AppleLotController and ApppleLotGateway for CRUD operations to the database based on RESTfull API.
+
+//This class keeps connection to database based on PDO
+<?php
+class Database
+{
+    public function __construct(private string $host,
+                                private string $name,
+                                private string $user,
+                                private string $password)
+    {}
+        
+    public function getConnection(): PDO
+    {
+        $dsn = "mysql:host={$this->host};dbname={$this->name};charset=utf8";
+        
+        return new PDO($dsn, $this->user, $this->password, [
+            PDO::ATTR_EMULATE_PREPARES => false,
+            PDO::ATTR_STRINGIFY_FETCHES => false
+        ]);
+    }
+}
+?>
+
+//This class manages what the endpoint APIs to do.
+<?php
+class AppleLotController
+{
+    public function __construct(private AppleLotGateway $gateway)
+    {
+    }
+    
+    public function processRequest(string $method, ?string $id): void
+    {
+        if ($id) {
+            
+            $this->processResourceRequest($method, $id);
+            
+        } else {
+            
+            $this->processCollectionRequest($method);
+            
+        }
+    }
+    
+    private function processResourceRequest(string $method, string $id): void
+    {
+        $appleLot = $this->gateway->get($id);
+        
+        if ( ! $appleLot) {
+            http_response_code(404);
+            echo json_encode(["message" => "AppleLot not found"]);
+            return;
+        }
+        
+        switch ($method) {
+            case "GET":
+                echo json_encode($appleLot);
+                break;
+                
+            case "PATCH":
+                $data = (array) json_decode(file_get_contents("php://input"), true);
+                
+                $errors = $this->getValidationErrors($data, false);
+                
+                if ( ! empty($errors)) {
+                    http_response_code(422);
+                    echo json_encode(["errors" => $errors]);
+                    break;
+                }
+                
+                $rows = $this->gateway->update($appleLot, $data);
+                
+                echo json_encode([
+                    "message" => "AppleLot $id updated",
+                    "rows" => $rows
+                ]);
+                break;
+                
+            default:
+                http_response_code(405);
+                header("Allow: GET, PATCH");
+        }
+    }
+    
+    private function processCollectionRequest(string $method): void
+    {
+        switch ($method) {
+            case "GET":
+                echo json_encode($this->gateway->getAll());
+                break;
+                
+            case "POST":
+                $data = (array) json_decode(file_get_contents("php://input"), true);
+                
+                $errors = $this->getValidationErrors($data);
+                
+                if ( ! empty($errors)) {
+                    http_response_code(422);
+                    echo json_encode(["errors" => $errors]);
+                    break;
+                }
+                
+                $id = $this->gateway->create($data);
+                
+                http_response_code(201);
+                echo json_encode([
+                    "message" => "AppleLot created",
+                    "id" => $id
+                ]);
+                break;
+            
+            default:
+                http_response_code(405);
+                header("Allow: GET, POST");
+        }
+    }
+    
+    private function getValidationErrors(array $data, bool $is_new = true): array
+    {
+        $errors = [];
+        
+        if ($is_new && empty($data["company_name"])) {
+            $errors[] = "Company Name";
+        }
+        
+        if (empty($data["cultiver"])) {
+            $errors[] = "Cultiver";
+        }
+		
+		if (empty($data["country_of_origin"])) {
+            $errors[] = "Country of Origin";
+        }
+		
+		if (empty($data["harvested_date"])) {
+            $errors[] = "Harvested Date";
+        }
+		if (empty($data["weight"]) || (int)$data["weight"]<1000) {
+            $errors[] = "Weight is required and should be greater than 1000";
+        }
+        
+        return $errors;
+    }
+}
+?>
+
+<?php
+
+//This class is works as an interface between datasource/datbase and controller. get and put data to the database
+class AppleLotGateway
+{
+    private PDO $conn;
+    
+    public function __construct(Database $database)
+    {
+        $this->conn = $database->getConnection();
+    }
+    
+    public function getAll(): array
+    {
+        $sql = "SELECT *
+                FROM appleLot";
+                
+        $stmt = $this->conn->query($sql);
+        
+        $data = [];
+        
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {       
+            $data[] = $row;
+        }
+        
+        return $data;
+    }
+    
+    public function create(array $data): string
+    {
+        $sql = "INSERT INTO appleLot (company_name, cultiver, country_of_origin, harvested_date, weight)
+                VALUES (:company_name, :cultiver, :country_of_origin, :harvested_date, :weight)";
+                
+        $stmt = $this->conn->prepare($sql);
+        
+        $stmt->bindValue(":company_name", $data["company_name"], PDO::PARAM_STR);
+		$stmt->bindValue(":cultiver", $data["cultiver"], PDO::PARAM_STR);
+		$stmt->bindValue(":country_of_origin", $data["country_of_origin"], PDO::PARAM_STR);
+        $stmt->bindValue(":harvested_date", $data["harvested_date"], PDO::PARAM_STR);
+		$stmt->bindValue(":weight", $data["weight"], PDO::PARAM_STR);
+        
+        $stmt->execute();
+        
+        return $this->conn->lastInsertId();
+    }
+    
+    public function get(string $id): array | false
+    {
+        $sql = "SELECT *
+                FROM appleLot
+                WHERE id = :id";
+                
+        $stmt = $this->conn->prepare($sql);
+        
+        $stmt->bindValue(":id", $id, PDO::PARAM_INT);
+        
+        $stmt->execute();
+        
+        $data = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        return $data;
+    }
+    
+    public function update(array $current, array $new): int
+    {
+        $sql = "UPDATE appleLot
+                SET company_name = :company_name, cultiver = :cultiver, country_of_origin = :country_of_origin, harvested_date = :harvested_date, weight = :weight
+                WHERE id = :id";
+                
+        $stmt = $this->conn->prepare($sql);
+        
+        $stmt->bindValue(":company_name", $new["company_name"] ?? $current["company_name"], PDO::PARAM_STR);
+        $stmt->bindValue(":cultiver", $new["cultiver"] ?? $current["cultiver"], PDO::PARAM_STR);
+		$stmt->bindValue(":country_of_origin", $new["country_of_origin"] ?? $current["country_of_origin"], PDO::PARAM_STR);
+		$stmt->bindValue(":harvested_date", $new["harvested_date"] ?? $current["harvested_date"], PDO::PARAM_STR);
+		$stmt->bindValue(":weight", $new["weight"] ?? $current["weight"], PDO::PARAM_STR);
+        $stmt->bindValue(":id", $current["id"], PDO::PARAM_INT);
+        
+        $stmt->execute();
+        
+        return $stmt->rowCount();
+    }
+
+}
+?>
+
+//ErrorHandler class handles the error and exceptions of the endpoints and returns the status codes. 
+<?php
+class ErrorHandler
+{
+    public static function handleException(Throwable $exception): void
+    {
+        http_response_code(500);
+        
+        echo json_encode([
+            "code" => $exception->getCode(),
+            "message" => $exception->getMessage(),
+            "file" => $exception->getFile(),
+            "line" => $exception->getLine()
+        ]);
+    }
+    
+    public static function handleError(
+        int $errno,
+        string $errstr,
+        string $errfile,
+        int $errline
+    ): bool
+    {
+        throw new ErrorException($errstr, 0, $errno, $errfile, $errline);
+    }
+}
+>?
+
+
+
+
+
+
+
+
+
+
+
+
